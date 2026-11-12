@@ -71,7 +71,7 @@ $mutex = New-Object Threading.Mutex($false, $RvceWatchMutexName)
 $owned = $false
 try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
 if (-not $owned) {
-    [void][Windows.Forms.MessageBox]::Show('The RVCE watcher is already running (look for the dot in the system tray).', 'RVCE-Connect')
+    [void](Show-RvceMessage 'Watcher already running.' 'Information')
     exit 0
 }
 $stopEvent = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, $RvceWatchStopEventName)
@@ -82,7 +82,7 @@ try {
     $TimeoutMs = [int]$cfg.TimeoutSeconds * 1000
     Initialize-RvceHelper $cfg
 } catch {
-    [void][Windows.Forms.MessageBox]::Show("RVCE watcher could not start: $($_.Exception.Message)", 'RVCE-Connect')
+    [void](Show-RvceMessage "Watcher could not start:`n`n$($_.Exception.Message)" 'Error')
     $mutex.ReleaseMutex(); exit 5
 }
 
@@ -148,7 +148,8 @@ Add-Separator
     try { $r = Invoke-PortalLogout } catch { $r = [pscustomobject]@{ Ok = $false; Message = $_.Exception.Message } }
     Write-RvceLog "Sign out from tray: $($r.Message)"
     Exit-Watcher
-    [void][Windows.Forms.MessageBox]::Show($r.Message, 'RVCE-Connect')
+    $icon = 'Information'; if (-not $r.Ok) { $icon = 'Warning' }
+    [void](Show-RvceMessage $r.Message $icon)
 })
 [void](Add-MenuItem 'Exit (stay signed in)' { Write-RvceLog 'Watcher stopped from tray.'; Exit-Watcher })
 $tray.ContextMenuStrip = $menu

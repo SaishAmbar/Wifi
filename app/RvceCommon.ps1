@@ -32,12 +32,109 @@ function Initialize-RvceGui {
     $RvceUi.Gui = $true
 }
 
-# icon: Information | Warning | Error | Question ; returns 'OK', 'Yes', 'No', ...
+# Message dialog with a fixed, comfortable width (the standard Windows message box sizes itself to the text).
+# icon: Information | Warning | Error | Question ; buttons: OK | YesNo ; default: Button1 | Button2
+# Returns 'OK', 'Yes' or 'No' (closing a Yes/No dialog with X counts as 'No').
+$RvceDialogWidth = 360
+
+# Current Windows (10/11) stock icons; falls back to the classic .NET icons if unavailable.
+function Get-RvceStockIcon([string]$name) {
+    Add-Type -AssemblyName System.Drawing
+    if (-not ('RvceWifi.StockIcon' -as [type])) {
+        Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Runtime.InteropServices;
+namespace RvceWifi {
+    public static class StockIcon {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct SHSTOCKICONINFO {
+            public uint cbSize; public IntPtr hIcon; public int iSysImageIndex; public int iIcon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szPath;
+        }
+        [DllImport("shell32.dll")] private static extern int SHGetStockIconInfo(int siid, uint flags, ref SHSTOCKICONINFO info);
+        [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr h);
+        public static Bitmap Get(int siid) {
+            SHSTOCKICONINFO info = new SHSTOCKICONINFO();
+            info.cbSize = (uint)Marshal.SizeOf(typeof(SHSTOCKICONINFO));
+            if (SHGetStockIconInfo(siid, 0x100 /* SHGSI_ICON | SHGSI_LARGEICON */, ref info) != 0 || info.hIcon == IntPtr.Zero) return null;
+            try { using (Icon ic = Icon.FromHandle(info.hIcon)) { return ic.ToBitmap(); } }
+            finally { DestroyIcon(info.hIcon); }
+        }
+    }
+}
+'@
+    }
+    $siid = @{ Information = 79; Warning = 78; Error = 80; Question = 23 }[$name]
+    $bmp = $null
+    try { $bmp = [RvceWifi.StockIcon]::Get([int]$siid) } catch { }
+    if (-not $bmp) { $bmp = ([Drawing.SystemIcons]::$name).ToBitmap() }
+    return $bmp
+}
+
 function Show-RvceMessage([string]$text, [string]$icon = 'Information', [string]$buttons = 'OK', [string]$default = 'Button1') {
-    $r = [Windows.Forms.MessageBox]::Show($RvceUi.Owner, $text, 'RVCE Wi-Fi',
-        [Windows.Forms.MessageBoxButtons]::$buttons, [Windows.Forms.MessageBoxIcon]::$icon,
-        [Windows.Forms.MessageBoxDefaultButton]::$default)
-    return [string]$r
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $w = $RvceDialogWidth
+    $f = New-Object Windows.Forms.Form
+    $f.Text = 'RVCE Wi-Fi'
+    $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $f.ShowIcon = $false; $f.ShowInTaskbar = $true; $f.TopMost = $true; $f.StartPosition = 'CenterScreen'
+    $f.BackColor = [Drawing.Color]::White
+    $f.Font = New-Object Drawing.Font('Segoe UI', 9.5)
+
+    $pic = New-Object Windows.Forms.PictureBox
+    $pic.Image = Get-RvceStockIcon $icon
+    $pic.SizeMode = 'Zoom'
+    $pic.Size = New-Object Drawing.Size(32, 32); $pic.Location = New-Object Drawing.Point(24, 24)
+
+    $lbl = New-Object Windows.Forms.Label
+    $lbl.Font = $f.Font
+    $lbl.UseMnemonic = $false
+    $lbl.Text = $text
+    $textWidth = $w - 72 - 24
+    # Measure with the label's real font and word wrapping, so long messages are never cut off.
+    $flags = [Windows.Forms.TextFormatFlags]::WordBreak -bor [Windows.Forms.TextFormatFlags]::NoPrefix
+    $meas = [Windows.Forms.TextRenderer]::MeasureText($text, $lbl.Font, (New-Object Drawing.Size($textWidth, 0)), $flags)
+    $textHeight = $meas.Height + 6
+    $lbl.AutoSize = $false
+    $lbl.Size = New-Object Drawing.Size($textWidth, [Math]::Max(32, $textHeight))
+    $lbl.Location = New-Object Drawing.Point(72, 24)
+    if ($textHeight -lt 32) { $lbl.TextAlign = 'MiddleLeft' }
+
+    $bandTop = 24 + $lbl.Height + 22
+    $band = New-Object Windows.Forms.Panel
+    $band.BackColor = [Drawing.SystemColors]::Control
+    $band.Location = New-Object Drawing.Point(0, $bandTop); $band.Size = New-Object Drawing.Size($w, 52)
+
+    $specs = @(@{ Text = 'OK'; Result = 'OK' })
+    if ($buttons -eq 'YesNo') { $specs = @(@{ Text = 'Yes'; Result = 'Yes' }, @{ Text = 'No'; Result = 'No' }) }
+    $btns = @()
+    $x = $w - 16
+    for ($i = $specs.Count - 1; $i -ge 0; $i--) {
+        $b = New-Object Windows.Forms.Button
+        $b.Text = $specs[$i].Text
+        $b.DialogResult = [Windows.Forms.DialogResult]::($specs[$i].Result)
+        $b.Size = New-Object Drawing.Size(96, 30)
+        $x -= 96
+        $b.Location = New-Object Drawing.Point($x, 11)
+        $x -= 8
+        $band.Controls.Add($b)
+        $btns = @($b) + $btns
+    }
+    $defIndex = 0; if ($default -eq 'Button2' -and $btns.Count -gt 1) { $defIndex = 1 }
+    $f.AcceptButton = $btns[$defIndex]
+    $f.CancelButton = $btns[$btns.Count - 1]
+
+    $f.Controls.AddRange(@($pic, $lbl, $band))
+    $f.ClientSize = New-Object Drawing.Size($w, ($bandTop + 52))
+    $defBtn = $btns[$defIndex]
+    $f.Add_Shown({ $f.Activate(); [void]$defBtn.Focus() })
+
+    $r = $f.ShowDialog($RvceUi.Owner)
+    $f.Dispose()
+    $s = [string]$r
+    if ($s -eq 'Cancel') { if ($buttons -eq 'YesNo') { $s = 'No' } else { $s = 'OK' } }
+    return $s
 }
 
 # Yes/No question: a dialog in dialog mode, a console prompt otherwise.
