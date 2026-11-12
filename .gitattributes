@@ -1,0 +1,3 @@
+# Windows tool: check out (and export in GitHub ZIP downloads) with Windows line endings.
+* text=auto eol=crlf
+*.exe binary

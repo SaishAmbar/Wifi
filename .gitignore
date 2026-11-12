@@ -1,0 +1,12 @@
+# Personal, created on first run (holds the certificate fingerprint *you* confirmed)
+app/config.json
+
+# Launchers are built on each PC by Setup.cmd (app/Build-Launchers.ps1)
+*.exe
+
+# Windows / editor clutter
+Thumbs.db
+desktop.ini
+*.bak
+*.tmp
+.vscode/
