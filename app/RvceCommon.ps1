@@ -168,7 +168,18 @@ function Write-RvceLog([string]$msg) {
     } catch { }
 }
 
+
 # ---------------------------------------------------------------- configuration
+$RvceDefaults = [ordered]@{
+    Ssid = 'RVCE'; PortalHost = '172.16.0.4'; PortalPort = 8090; PinnedCertSha256 = ''
+    CredentialTarget = 'RVCE-Connect:CaptivePortal'
+    ProbeUrl = 'http://www.msftconnecttest.com/connecttest.txt'
+    ProbeExpectedBody = 'Microsoft Connect Test'
+    TimeoutSeconds = 10; VerifyAttempts = 5; VerifyIntervalSeconds = 2
+    WatchIntervalSeconds = 1500; UseKeepalive = $true; KeepaliveSeconds = 180
+    AutoSignInCooldownMinutes = 5; MaxAutoSignInFailures = 3
+}
+
 function Read-RvceConfig([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) {
         # First run: create this user's own config.json (not tracked by git) from the shipped defaults.
@@ -179,27 +190,33 @@ function Read-RvceConfig([string]$Path) {
     try { $c = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
     catch { throw "config.json is not valid JSON: $($_.Exception.Message)" }
 
-    $defaults = [ordered]@{
-        Ssid = 'RVCE'; PortalHost = '172.16.0.2'; PortalPort = 1003; PinnedCertSha256 = ''
-        CredentialTarget = 'RVCE-Connect:CaptivePortal'
-        ProbeUrl = 'http://www.msftconnecttest.com/connecttest.txt'
-        ProbeExpectedBody = 'Microsoft Connect Test'
-        BrowserFallbackUrl = 'http://www.msftconnecttest.com/redirect'
-        TimeoutSeconds = 10; VerifyAttempts = 5; VerifyIntervalSeconds = 2
-        WatchIntervalSeconds = 60; AutoSignInCooldownMinutes = 5; MaxAutoSignInFailures = 3; UseKeepalive = $true
-    }
-    foreach ($k in $defaults.Keys) {
+    $changed = $false
+    foreach ($k in $RvceDefaults.Keys) {
         if (-not ($c.PSObject.Properties.Name -contains $k) -or $null -eq $c.$k) {
-            $c | Add-Member -NotePropertyName $k -NotePropertyValue $defaults[$k] -Force
+            $c | Add-Member -NotePropertyName $k -NotePropertyValue $RvceDefaults[$k] -Force
+            $changed = $true
         }
     }
+    # Migrate configs from the FortiGate era (portal 172.16.0.2:1003, checks every 60 s) to the Sophos portal.
+    # The old certificate pin belongs to the old portal, so it is cleared and confirmed again on the next run.
+    if ($c.PortalHost -eq '172.16.0.2' -and [int]$c.PortalPort -eq 1003) {
+        $c.PortalHost = $RvceDefaults.PortalHost; $c.PortalPort = $RvceDefaults.PortalPort; $c.PinnedCertSha256 = ''
+        $changed = $true
+    }
+    if ([int]$c.WatchIntervalSeconds -eq 60) { $c.WatchIntervalSeconds = $RvceDefaults.WatchIntervalSeconds; $changed = $true }
+    if ($c.PSObject.Properties.Name -contains 'BrowserFallbackUrl') { $c.PSObject.Properties.Remove('BrowserFallbackUrl'); $changed = $true }
+    if ($changed) {
+        try { Save-RvceConfig $c $Path; Write-RvceLog 'config.json updated (Sophos portal defaults).' } catch { }
+    }
+
     $probe = $null
     if ([string]::IsNullOrWhiteSpace($c.Ssid) -or [string]::IsNullOrWhiteSpace($c.PortalHost) -or
         [int]$c.PortalPort -lt 1 -or [int]$c.PortalPort -gt 65535 -or
         -not [Uri]::TryCreate([string]$c.ProbeUrl, [UriKind]::Absolute, [ref]$probe) -or $probe.Scheme -ne 'http') {
         throw 'config.json: Ssid, PortalHost, PortalPort (1-65535) and an http:// ProbeUrl are required.'
     }
-    if ([int]$c.WatchIntervalSeconds -lt 30) { $c.WatchIntervalSeconds = 30 }
+    if ([int]$c.WatchIntervalSeconds -lt 60) { $c.WatchIntervalSeconds = 60 }
+    if ([int]$c.KeepaliveSeconds -lt 30) { $c.KeepaliveSeconds = 30 }
     if ([int]$c.AutoSignInCooldownMinutes -lt 2) { $c.AutoSignInCooldownMinutes = 2 }
     return $c
 }
@@ -264,52 +281,35 @@ function Test-ExpectedSsid($state) {
     return $state.Ssid -match ('^' + [regex]::Escape($cfg.Ssid) + '( \d+)?$')
 }
 
-# ---------------------------------------------------------------- probing / portal discovery
-function Find-RedirectUrl($r, [Uri]$base) {
-    $cands = New-Object System.Collections.Generic.List[string]
-    if ($r.Location) { $cands.Add($r.Location) }
-    if ($r.Body) {
-        $patterns = @(
-            '(?i)(?:window\.|document\.|top\.)?location(?:\.href)?\s*=\s*["'']([^"'']+)["'']',
-            '(?i)location\.replace\(\s*["'']([^"'']+)["'']',
-            '(?i)<meta[^>]+http-equiv\s*=\s*["'']?refresh["'']?[^>]*content\s*=\s*["''][^"'']*?url\s*=\s*([^"''>\s]+)',
-            '(?i)(https?://[^\s"''<>]+/fgtauth\?[^\s"''<>]*)'
-        )
-        foreach ($p in $patterns) {
-            $m = [regex]::Match($r.Body, $p)
-            if ($m.Success) { $cands.Add([Net.WebUtility]::HtmlDecode($m.Groups[1].Value)) }
-        }
-    }
-    foreach ($c in $cands) {
-        [Uri]$u = $null
-        if ([Uri]::TryCreate($base, $c, [ref]$u) -and ($u.Scheme -eq 'http' -or $u.Scheme -eq 'https')) { return $u }
-    }
-    return $null
-}
-
+# ---------------------------------------------------------------- internet check
+# One plain-HTTP request to the Windows connectivity-check URL. State: Online | Captive | Unreachable.
 function Invoke-Probe {
     $r = [RvceWifi.Portal]::Get([string]$cfg.ProbeUrl, $TimeoutMs)
-    if ($r.Status -eq 0) {
-        return [pscustomobject]@{ State = 'Unreachable'; PortalUrl = $null; Detail = $r.Error }
-    }
+    if ($r.Status -eq 0) { return [pscustomobject]@{ State = 'Unreachable'; Detail = $r.Error } }
     if ($r.Status -eq 200 -and $r.Body -and $r.Body.Trim() -eq $cfg.ProbeExpectedBody) {
-        return [pscustomobject]@{ State = 'Online'; PortalUrl = $null; Detail = $null }
+        return [pscustomobject]@{ State = 'Online'; Detail = $null }
     }
-    $u = Find-RedirectUrl $r ([Uri]$cfg.ProbeUrl)
-    return [pscustomobject]@{ State = 'Captive'; PortalUrl = $u; Detail = "HTTP $($r.Status)" }
+    return [pscustomobject]@{ State = 'Captive'; Detail = "HTTP $($r.Status)" }
 }
 
-# Follows plain-HTTP hops on the portal host (e.g. http://gw:1000/fgtauth -> https://gw:1003/fgtauth).
-function Resolve-PortalUrl([Uri]$u) {
-    for ($hop = 0; $hop -lt 3 -and $u -and $u.Scheme -eq 'http'; $hop++) {
-        if ($u.Host -ine $cfg.PortalHost) { return $u }
-        $r = [RvceWifi.Portal]::Get($u.AbsoluteUri, $TimeoutMs)
-        if ($r.Status -eq 0) { return $u }
-        $next = Find-RedirectUrl $r $u
-        if (-not $next) { return $u }
-        $u = $next
-    }
-    return $u
+# ---------------------------------------------------------------- Sophos portal
+# Protocol (from the portal's own /javascript/validation/httpclient.js):
+#   sign in   POST /login.xml   mode=191 username password a=<ms> producttype=0
+#             reply <status>: LIVE = signed in, LOGIN = rejected (reason in <message>), CHALLENGE = extra step
+#   sign out  POST /logout.xml  mode=193 username a producttype=0     reply <status>LOGIN
+#   keep-alive GET /live?mode=192&username=<lower>&a=<ms>&producttype=0   reply <ack>: ack | nack | login_again | live_off
+# The portal page sends a keep-alive every 180 s and signs out when its tab is closed.
+function Get-PortalBase { 'https://{0}:{1}' -f $cfg.PortalHost, [int]$cfg.PortalPort }
+function Get-PortalPageUrl { [Uri]((Get-PortalBase) + '/httpclient.html') }
+function Get-SophosTime { [string][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+
+# Value of <tag> in a Sophos XML reply (CDATA or plain text). Regex instead of an XML parser: the replies are tiny.
+function Get-SophosTag([string]$xml, [string]$tag) {
+    if (-not $xml) { return $null }
+    $m = [regex]::Match($xml, '(?is)<' + $tag + '>\s*(?:<!\[CDATA\[(.*?)\]\]>|([^<]*))\s*</' + $tag + '>')
+    if (-not $m.Success) { return $null }
+    if ($m.Groups[1].Success) { return $m.Groups[1].Value.Trim() }
+    return [Net.WebUtility]::HtmlDecode($m.Groups[2].Value).Trim()
 }
 
 function Format-Fingerprint([string]$hex) {
@@ -330,60 +330,94 @@ function Get-PortalPage([Uri]$u) {
     return [pscustomobject]@{ Response = $r; Cert = $cert; SeenSha256 = $seen }
 }
 
-# ---------------------------------------------------------------- login form parsing
-function Get-Attr([string]$attrs, [string]$name) {
-    $m = [regex]::Match($attrs, '(?is)(?:^|\s)' + [regex]::Escape($name) + '\s*=\s*(?:"([^"]*)"|''([^'']*)''|([^\s>]+))')
-    if (-not $m.Success) { return $null }
-    foreach ($g in 1..3) { if ($m.Groups[$g].Success) { return [Net.WebUtility]::HtmlDecode($m.Groups[$g].Value) } }
-    return $null
-}
-
-function Get-LoginForm([string]$html, [Uri]$baseUri) {
-    if (-not $html) { return $null }
-    foreach ($f in [regex]::Matches($html, '(?is)<form\b([^>]*)>(.*?)</form>')) {
-        $fields = @(foreach ($i in [regex]::Matches($f.Groups[2].Value, '(?is)<input\b([^>]*?)/?>')) {
-            $a = $i.Groups[1].Value
-            $t = Get-Attr $a 'type'; if (-not $t) { $t = 'text' }
-            [pscustomobject]@{
-                Name    = Get-Attr $a 'name'
-                Type    = $t.ToLowerInvariant()
-                Value   = Get-Attr $a 'value'
-                Checked = ($a -match '(?i)(^|\s)checked(\s|=|$)')
-            }
-        })
-        $pw = @($fields | Where-Object { $_.Type -eq 'password' -and $_.Name })
-        if ($pw.Count -ne 1) { continue }
-        $users = @($fields | Where-Object { $_.Name -and @('text', 'email') -contains $_.Type })
-        if ($users.Count -lt 1) { continue }
-        $user = @($users | Where-Object { $_.Name -match '(?i)user|login|uid|email|name' }) + $users | Select-Object -First 1
-
-        $extra = @($fields | Where-Object {
-            $_.Name -and ($_.Type -eq 'hidden' -or (@('checkbox', 'radio') -contains $_.Type -and $_.Checked))
-        })
-        $submit = @($fields | Where-Object { $_.Type -eq 'submit' -and $_.Name }) | Select-Object -First 1
-        if ($submit) { $extra += $submit }
-
-        $method = Get-Attr $f.Groups[1].Value 'method'; if (-not $method) { $method = 'get' }
-        $action = Get-Attr $f.Groups[1].Value 'action'
-        [Uri]$actionUri = $null
-        if ([string]::IsNullOrWhiteSpace($action)) { $actionUri = $baseUri }
-        elseif (-not [Uri]::TryCreate($baseUri, $action, [ref]$actionUri)) { continue }
-
-        return [pscustomobject]@{
-            Action     = $actionUri
-            Method     = $method.ToUpperInvariant()
-            UserField  = $user.Name
-            PassField  = $pw[0].Name
-            Names      = [string[]]@($extra | ForEach-Object { $_.Name })
-            Values     = [string[]]@($extra | ForEach-Object { if ($null -eq $_.Value) { '' } else { $_.Value } })
-        }
+# Signs in ONCE and verifies access. Never retries.
+# Result: Online | Rejected | Timeout | NotVerified | Error ; Detail: the portal's message or the error.
+function Invoke-SophosLogin($Cred) {
+    $res = [pscustomobject]@{ Result = ''; Detail = '' }
+    $user = $Cred.UserName.Replace("'", "''")   # the portal's own page escapes quotes this way
+    $resp = $null
+    try {
+        $resp = [RvceWifi.Portal]::PostLogin((Get-PortalBase) + '/login.xml', (Get-PortalPageUrl).AbsoluteUri,
+            [string[]]@('mode', 'a', 'producttype'), [string[]]@('191', (Get-SophosTime), '0'),
+            'username', $user, 'password', $Cred.Password, $TimeoutMs)
+    } catch {
+        $res.Result = 'Error'; $res.Detail = $_.Exception.Message
+        return $res
     }
-    return $null
+    if ($resp.Status -eq 0) { $res.Result = 'Timeout'; $res.Detail = $resp.Error; return $res }
+
+    $status = Get-SophosTag $resp.Body 'status'
+    $msg = Get-SophosTag $resp.Body 'message'
+    if ($msg) { $msg = ($msg -replace '\{username\}', $Cred.UserName).Trim() }
+
+    if ($status -eq 'LIVE') {
+        Save-RvceSession $Cred.UserName
+        for ($i = 1; $i -le [int]$cfg.VerifyAttempts; $i++) {
+            Start-Sleep -Seconds ([int]$cfg.VerifyIntervalSeconds)
+            if ((Invoke-Probe).State -eq 'Online') { $res.Result = 'Online'; return $res }
+        }
+        $res.Result = 'NotVerified'; $res.Detail = 'The portal says you are signed in, but the internet check still fails.'
+        return $res
+    }
+    if ($status -eq 'CHALLENGE') {
+        $res.Result = 'Rejected'
+        $res.Detail = 'The portal asked for an extra verification step that this tool does not support. Sign in in the browser.'
+        return $res
+    }
+    if ($status -eq 'LOGIN') {
+        $res.Result = 'Rejected'
+        $res.Detail = $msg; if (-not $res.Detail) { $res.Detail = 'The portal rejected the sign-in.' }
+        return $res
+    }
+    $res.Result = 'Error'; $res.Detail = "Unexpected reply from the portal (HTTP $($resp.Status))."
+    return $res
 }
 
-# A form is only usable if it POSTs to the allow-listed HTTPS portal.
-function Test-LoginForm($form) {
-    return [bool]($form -and $form.Method -eq 'POST' -and [RvceWifi.Portal]::IsAllowed($form.Action))
+# Keep-alive, as the portal page sends it. Returns Ok | SignedOut | Off | Failed.
+function Send-SophosKeepalive([string]$user) {
+    $q = 'mode=192&username=' + [Uri]::EscapeDataString($user.ToLowerInvariant()) + '&a=' + (Get-SophosTime) + '&producttype=0'
+    $r = [RvceWifi.Portal]::Get((Get-PortalBase) + '/live?' + $q, $TimeoutMs)
+    if ($r.Status -ne 200) { return 'Failed' }
+    switch (Get-SophosTag $r.Body 'ack') {
+        'ack'         { return 'Ok' }
+        'nack'        { return 'SignedOut' }
+        'login_again' { return 'SignedOut' }
+        'live_off'    { return 'Off' }
+    }
+    return 'Failed'
+}
+
+# Signs out of the portal. Returns @{ Ok; Message }.
+function Invoke-PortalLogout {
+    if ([string]::IsNullOrEmpty([string]$cfg.PinnedCertSha256)) {
+        return [pscustomobject]@{ Ok = $false; Message = 'Sign in once with RVCE Connect first (the portal certificate is not confirmed yet).' }
+    }
+    $user = Get-PortalUser
+    if (-not $user) {
+        return [pscustomobject]@{ Ok = $false; Message = 'No saved username to sign out with. Use Sign out on the portal page in your browser.' }
+    }
+    $r = $null
+    try {
+        [RvceWifi.Portal]::ResetLastCert()
+        $r = [RvceWifi.Portal]::PostForm((Get-PortalBase) + '/logout.xml', (Get-PortalPageUrl).AbsoluteUri,
+            [string[]]@('mode', 'username', 'a', 'producttype'), [string[]]@('193', $user.Replace("'", "''"), (Get-SophosTime), '0'), $TimeoutMs)
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Message = $_.Exception.Message }
+    }
+    if ($r.Status -eq 0) {
+        $seen = [RvceWifi.Portal]::LastCertSha256
+        if ($seen -and $seen -ine [string]$cfg.PinnedCertSha256) {
+            return [pscustomobject]@{ Ok = $false; Message = 'The portal presented a different certificate than the one you confirmed. Nothing was sent.' }
+        }
+        return [pscustomobject]@{ Ok = $false; Message = "The portal did not respond ($($r.Error))." }
+    }
+    Clear-RvceSession
+    if ((Get-SophosTag $r.Body 'status') -eq 'LOGIN' -or (Invoke-Probe).State -ne 'Online') {
+        Write-RvceLog 'Signed out of the portal.'
+        return [pscustomobject]@{ Ok = $true; Message = 'Signed out of the RVCE portal.' }
+    }
+    $msg = Get-SophosTag $r.Body 'message'
+    return [pscustomobject]@{ Ok = $false; Message = ("The portal did not confirm the sign-out. $msg").Trim() }
 }
 
 # ---------------------------------------------------------------- browser
@@ -402,14 +436,25 @@ function Get-StoredCredential {
     return $null
 }
 
-# ---------------------------------------------------------------- portal session (keep-alive / logout links)
-# Holds only the portal's keep-alive/logout links (no credentials), per user in %LOCALAPPDATA%.
+# Username for keep-alive and sign-out: the one this tool last signed in with, else the saved credential's.
+function Get-PortalUser {
+    $s = Get-RvceSession
+    if ($s -and ($s.PSObject.Properties.Name -contains 'User') -and $s.User) { return [string]$s.User }
+    try {
+        $c = [RvceWifi.CredMan]::Read([string]$cfg.CredentialTarget)
+        if ($c -and $c.UserName) { $c.Password.Dispose(); return $c.UserName }
+    } catch { }
+    return $null
+}
+
+# ---------------------------------------------------------------- portal session
+# Remembers which username is signed in (no password), per user in %LOCALAPPDATA%.
 function Get-SessionPath { Join-Path $RvceDataDir 'session.json' }
 
-function Save-RvceSession($links) {
+function Save-RvceSession([string]$user) {
     try {
         if (-not (Test-Path -LiteralPath $RvceDataDir)) { New-Item -ItemType Directory -Path $RvceDataDir | Out-Null }
-        $o = [pscustomobject]@{ KeepaliveUrl = $links.KeepaliveUrl; LogoutUrl = $links.LogoutUrl; SignedInAt = (Get-Date).ToString('s') }
+        $o = [pscustomobject]@{ User = $user; SignedInAt = (Get-Date).ToString('s') }
         [IO.File]::WriteAllText((Get-SessionPath), ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
     } catch { }
 }
@@ -423,85 +468,6 @@ function Get-RvceSession {
 function Clear-RvceSession {
     $p = Get-SessionPath
     if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force }
-}
-
-function Find-PortalLinks([string]$body, [Uri]$base) {
-    $out = [pscustomobject]@{ KeepaliveUrl = $null; LogoutUrl = $null }
-    if (-not $body) { return $out }
-    foreach ($kind in 'keepalive', 'logout') {
-        $m = [regex]::Match($body, '(?i)(?:https://[^\s"''<>/]+)?/' + $kind + '\?[^\s"''<>]*')
-        if (-not $m.Success) { continue }
-        [Uri]$u = $null
-        if ([Uri]::TryCreate($base, [Net.WebUtility]::HtmlDecode($m.Value), [ref]$u) -and [RvceWifi.Portal]::IsAllowed($u)) {
-            if ($kind -eq 'keepalive') { $out.KeepaliveUrl = $u.AbsoluteUri } else { $out.LogoutUrl = $u.AbsoluteUri }
-        }
-    }
-    # FortiGate uses the same token for both links.
-    if (-not $out.LogoutUrl -and $out.KeepaliveUrl) { $out.LogoutUrl = $out.KeepaliveUrl -replace '/keepalive\?', '/logout?' }
-    return $out
-}
-
-# ---------------------------------------------------------------- sign-in / sign-out
-# Submits the form ONCE and verifies access. Never retries.
-# Result: Online | Rejected | Timeout | NotVerified | Error
-function Submit-PortalLogin([Uri]$Portal, $Form, $Cred) {
-    $res = [pscustomobject]@{ Result = ''; Detail = ''; KeepaliveUrl = $null; LogoutUrl = $null }
-    $resp = $null
-    try {
-        $resp = [RvceWifi.Portal]::PostLogin($Form.Action.AbsoluteUri, $Portal.AbsoluteUri, $Form.Names, $Form.Values,
-                                             $Form.UserField, $Cred.UserName, $Form.PassField, $Cred.Password, $TimeoutMs)
-    } catch {
-        $res.Result = 'Error'; $res.Detail = $_.Exception.Message
-        return $res
-    }
-    $timedOut = ($resp.Status -eq 0)
-    if ($timedOut) { $res.Detail = $resp.Error }
-    $looksRejected = (-not $timedOut) -and $resp.Body -and (
-        $resp.Body -match '(?i)authentication failed|invalid (user|credential|password|login)|incorrect (user|password)|login failed|failed to authenticate|access denied' -or
-        $resp.Body -match '(?i)<input[^>]+type\s*=\s*["'']?password')
-
-    $online = $false
-    for ($i = 1; $i -le [int]$cfg.VerifyAttempts; $i++) {
-        Start-Sleep -Seconds ([int]$cfg.VerifyIntervalSeconds)
-        if ((Invoke-Probe).State -eq 'Online') { $online = $true; break }
-    }
-
-    if ($online) {
-        $links = Find-PortalLinks ([string]$resp.Body) $Portal
-        $res.KeepaliveUrl = $links.KeepaliveUrl; $res.LogoutUrl = $links.LogoutUrl
-        Save-RvceSession $links
-        $res.Result = 'Online'
-    }
-    elseif ($looksRejected) { $res.Result = 'Rejected' }
-    elseif ($timedOut)      { $res.Result = 'Timeout' }
-    else                    { $res.Result = 'NotVerified' }
-    return $res
-}
-
-# Signs out of the portal. Returns @{ Ok; Message }.
-function Invoke-PortalLogout {
-    if ([string]::IsNullOrEmpty([string]$cfg.PinnedCertSha256)) {
-        return [pscustomobject]@{ Ok = $false; Message = 'The portal certificate has not been confirmed yet, so nothing was sent. Sign in once with RVCE-Connect first.' }
-    }
-    $s = Get-RvceSession
-    [Uri]$u = $null
-    if ($s -and ($s.PSObject.Properties.Name -contains 'LogoutUrl') -and $s.LogoutUrl) { [void][Uri]::TryCreate([string]$s.LogoutUrl, [UriKind]::Absolute, [ref]$u) }
-    if (-not $u -or -not [RvceWifi.Portal]::IsAllowed($u)) { $u = [Uri]('https://{0}:{1}/logout?' -f $cfg.PortalHost, $cfg.PortalPort) }
-
-    $p = Get-PortalPage $u
-    if ($p.Cert -ne 'Ok') {
-        return [pscustomobject]@{ Ok = $false; Message = 'The portal presented a different certificate than the one you confirmed. Nothing was sent.' }
-    }
-    if ($p.Response.Status -eq 0) {
-        return [pscustomobject]@{ Ok = $false; Message = "The portal did not respond ($($p.Response.Error))." }
-    }
-    Clear-RvceSession
-    Start-Sleep -Seconds 2
-    if ((Invoke-Probe).State -eq 'Online') {
-        return [pscustomobject]@{ Ok = $false; Message = 'Sign-out was sent, but internet access still works. The portal may not support this sign-out link; it will expire on its own, or sign out from the portal page in your browser.' }
-    }
-    Write-RvceLog 'Signed out of the portal.'
-    return [pscustomobject]@{ Ok = $true; Message = 'Signed out of the RVCE portal.' }
 }
 
 # ---------------------------------------------------------------- watcher control

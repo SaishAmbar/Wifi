@@ -3,6 +3,7 @@ app/config.json
 
 # Launchers are built on each PC by Setup.cmd (app/Build-Launchers.ps1)
 *.exe
+app/icons/
 
 # Windows / editor clutter
 Thumbs.db

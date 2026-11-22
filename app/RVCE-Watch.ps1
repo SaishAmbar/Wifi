@@ -1,20 +1,24 @@
 <#
 .SYNOPSIS
-    Background watcher for the RVCE Wi-Fi. Lives in the system tray and checks once a minute.
+    Background watcher for the RVCE Wi-Fi (Sophos portal). Lives in the system tray.
 
 .DESCRIPTION
-    Every WatchIntervalSeconds (default 60) while you are on the RVCE Wi-Fi it:
-      - checks internet access (one request to the Windows connectivity-check URL);
-      - if online, refreshes the portal's own keep-alive page (what the portal's browser tab does);
-      - if the portal has signed you out, signs you back in ONCE with the credentials saved in
-        Windows Credential Manager (it never prompts and never uses anything else).
+    Only acts while you are on the RVCE Wi-Fi; on any other network (or with Wi-Fi off) it stays idle.
+    On RVCE it:
+      - checks internet access every WatchIntervalSeconds (default 1500 = 25 min), and a few seconds
+        after the Wi-Fi connection changes (joining RVCE, waking from sleep). Change detection is local
+        and sends nothing over the network;
+      - while signed in, sends the portal's own keep-alive to the firewall every KeepaliveSeconds
+        (default 180 s), exactly as the portal's browser tab does. If the firewall answers that you are
+        signed out, it signs you back in straight away. Turn off with "UseKeepalive": false;
+      - if you are not signed in, signs in ONCE with the credentials saved in Windows Credential Manager
+        (it never prompts and never uses anything else).
     Safeguards against repeated submissions:
-      - at most one automatic sign-in every AutoSignInCooldownMinutes (default 5);
+      - after a failed attempt it waits AutoSignInCooldownMinutes (default 5) before the next one;
       - automatic sign-in stops completely if the portal rejects the credentials, the certificate
         changes, or it fails MaxAutoSignInFailures times in a row (default 3). Use "Sign in now"
         from the tray menu to resume.
-    State changes (disconnects, sign-outs, re-sign-ins) are written to
-    %LOCALAPPDATA%\RVCE-Connect\watch.log. Credentials are never logged.
+    State changes are written to %LOCALAPPDATA%\RVCE-Connect\watch.log. Credentials are never logged.
 
 .PARAMETER InstallStartup  Start the watcher automatically when you log in to Windows.
 .PARAMETER RemoveStartup   Undo -InstallStartup.
@@ -43,7 +47,7 @@ if ($InstallStartup) {
     $lnk = $sh.CreateShortcut($StartupLnk)
     # Use the no-window launcher so no terminal window appears at log-in.
     $launcher = Join-Path (Split-Path -Parent $ScriptDir) 'RVCE-Connect.exe'
-    if (-not (Test-Path -LiteralPath $launcher)) { Write-Fail "Missing $launcher. Run app\Build-Launchers.ps1 first."; exit 1 }
+    if (-not (Test-Path -LiteralPath $launcher)) { Write-Fail "Missing $launcher. Run Setup.cmd first."; exit 1 }
     $lnk.TargetPath = $launcher
     $lnk.Arguments = '/watch'
     $lnk.WorkingDirectory = Split-Path -Parent $ScriptDir
@@ -88,8 +92,25 @@ try {
 
 # Mutable state lives in a hashtable so event handlers can update it.
 $W = @{
-    State = 'Starting'; Busy = $false; NextCheck = (Get-Date)
-    LastAttempt = $null; Failures = 0; Blocked = $null; LastPortal = $null
+    State = 'Starting'; Busy = $false; NextCheck = (Get-Date); NextKeepalive = $null
+    NextNetLook = (Get-Date); NetSignature = $null
+    LastAttempt = $null; Failures = 0; Blocked = $null
+}
+
+# Wi-Fi adapters that are up, with their IPv4 addresses. Purely local; used to notice network changes.
+function Get-WifiSignature {
+    try {
+        $parts = foreach ($n in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($n.NetworkInterfaceType -eq [Net.NetworkInformation.NetworkInterfaceType]::Wireless80211 -and
+                $n.OperationalStatus -eq [Net.NetworkInformation.OperationalStatus]::Up) {
+                $ips = @($n.GetIPProperties().UnicastAddresses |
+                         Where-Object { $_.Address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork } |
+                         ForEach-Object { $_.Address.ToString() }) -join ','
+                "$($n.Id)=$ips"
+            }
+        }
+        return (@($parts) -join ';')
+    } catch { return '' }
 }
 
 # ---------------------------------------------------------------- tray icon
@@ -133,23 +154,21 @@ Add-Separator
     Start-Process (Join-Path (Split-Path -Parent $ScriptDir) 'RVCE-Connect.exe')
     $W.NextCheck = (Get-Date).AddSeconds(30)
 })
-[void](Add-MenuItem 'Open portal in browser' {
-    if ($W.LastPortal) { Open-InBrowser $W.LastPortal } else { Open-InBrowser ([Uri]$cfg.BrowserFallbackUrl) }
-})
+[void](Add-MenuItem 'Open portal in browser' { Open-InBrowser (Get-PortalPageUrl) })
 [void](Add-MenuItem 'Open connection log' {
     $log = Join-Path $RvceDataDir 'watch.log'
     if (Test-Path -LiteralPath $log) { Start-Process notepad.exe -ArgumentList ('"' + $log + '"') }
 })
 Add-Separator
-[void](Add-MenuItem 'Sign out and exit' {
+[void](Add-MenuItem 'Disconnect and exit' {
     $timer.Stop()
     Set-TrayState 'Working' 'Signing out...'
     $r = $null
     try { $r = Invoke-PortalLogout } catch { $r = [pscustomobject]@{ Ok = $false; Message = $_.Exception.Message } }
     Write-RvceLog "Sign out from tray: $($r.Message)"
     Exit-Watcher
-    $icon = 'Information'; if (-not $r.Ok) { $icon = 'Warning' }
-    [void](Show-RvceMessage $r.Message $icon)
+    if ($r.Ok) { [void](Show-RvceMessage 'Disconnected.' 'Information') }
+    else { [void](Show-RvceMessage "Watcher stopped, but sign-out did not work.`n`n$($r.Message)" 'Warning') }
 })
 [void](Add-MenuItem 'Exit (stay signed in)' { Write-RvceLog 'Watcher stopped from tray.'; Exit-Watcher })
 $tray.ContextMenuStrip = $menu
@@ -182,16 +201,6 @@ function Set-Blocked([string]$reason) {
     Set-WatchState 'Blocked' 'Problem' "Sign-in needed: $reason" 'Warning'
 }
 
-function Send-Keepalive {
-    if (-not $cfg.UseKeepalive) { return }
-    $s = Get-RvceSession
-    if (-not $s -or -not ($s.PSObject.Properties.Name -contains 'KeepaliveUrl') -or -not $s.KeepaliveUrl) { return }
-    [Uri]$u = $null
-    if (-not [Uri]::TryCreate([string]$s.KeepaliveUrl, [UriKind]::Absolute, [ref]$u) -or -not [RvceWifi.Portal]::IsAllowed($u)) { return }
-    $p = Get-PortalPage $u
-    if ($p.Cert -ne 'Ok') { Write-RvceLog 'Keep-alive skipped: portal certificate does not match.' }
-}
-
 function Exit-Watcher {
     $timer.Stop()
     $tray.Visible = $false
@@ -199,14 +208,39 @@ function Exit-Watcher {
     [Windows.Forms.Application]::ExitThread()
 }
 
-# ---------------------------------------------------------------- the check
+# ---------------------------------------------------------------- keep-alive (between full checks)
+function Invoke-Keepalive {
+    $W.NextKeepalive = (Get-Date).AddSeconds([int]$cfg.KeepaliveSeconds)
+    if ([string]::IsNullOrEmpty([string]$cfg.PinnedCertSha256)) { $W.NextKeepalive = $null; return }
+    $user = Get-PortalUser
+    if (-not $user) { return }
+    switch (Send-SophosKeepalive $user) {
+        'Ok'        { }
+        'Off'       { $W.NextKeepalive = $null }   # the portal does not want keep-alives
+        'SignedOut' { Write-RvceLog 'Keep-alive: the portal says you were signed out.'; $W.NextCheck = Get-Date }
+        default     { $W.NextCheck = Get-Date }    # portal unreachable: do a full check now
+    }
+}
+
+# ---------------------------------------------------------------- the full check
 function Invoke-WatchCheck([switch]$Manual) {
     if ($W.Busy) { return }
     $W.Busy = $true
+    $next = [int]$cfg.WatchIntervalSeconds
     try {
         $wasOnRvce = @('Online', 'Captive', 'Retry', 'Blocked', 'Unreachable', 'Waiting') -contains $W.State
+        $W.NextKeepalive = $null
 
-        # Wi-Fi
+        # Pick up a certificate confirmed (or reset) by RVCE Connect while the watcher was running.
+        try {
+            $pin = [string](Read-RvceConfig $ConfigPath).PinnedCertSha256
+            if ($pin -ne [string]$cfg.PinnedCertSha256) {
+                $cfg.PinnedCertSha256 = $pin; [RvceWifi.Portal]::PinnedSha256 = $pin
+                if ($W.Blocked -like '*certificate*') { $W.Blocked = $null }
+            }
+        } catch { }
+
+        # Wi-Fi: on any other network (or none), leave everything as it is.
         $wifi = Get-WifiState
         if (-not (Test-ExpectedSsid $wifi)) {
             if ($wifi.Connected -and $wifi.Ssid) { Set-WatchState 'Away' 'Away' "On '$($wifi.Ssid)' (not $($cfg.Ssid)) - idle" }
@@ -223,22 +257,19 @@ function Invoke-WatchCheck([switch]$Manual) {
             if ($wasOnRvce -and $W.State -ne 'Online') { $note = 'Info' }
             Set-WatchState 'Online' 'Online' 'Online' $note
             $W.Failures = 0
-            Send-Keepalive
-            return
-        }
-        if ($probe.State -eq 'Unreachable') {
-            Set-WatchState 'Unreachable' 'Problem' 'No internet and the portal is not responding' 'Warning'
+            if ($cfg.UseKeepalive) { $W.NextKeepalive = (Get-Date).AddSeconds([int]$cfg.KeepaliveSeconds) }
             return
         }
 
-        # Captive portal: the portal has signed us out (or we were never signed in).
-        if ($W.State -eq 'Online') { Write-RvceLog 'Internet lost: the portal is asking for sign-in again.' }
+        # Not signed in: sign in once (subject to the safeguards).
+        if ($W.State -eq 'Online') { Write-RvceLog "Internet lost ($($probe.State)): signing in again." }
         if ($W.Blocked) { Set-Blocked $W.Blocked; return }
 
         $cooldown = [int]$cfg.AutoSignInCooldownMinutes
         if ($W.LastAttempt -and ((Get-Date) - $W.LastAttempt).TotalMinutes -lt $cooldown -and -not $Manual) {
             $wait = [math]::Ceiling($cooldown - ((Get-Date) - $W.LastAttempt).TotalMinutes)
             Set-WatchState 'Waiting' 'Working' "Signed out - next automatic sign-in in $wait min"
+            $next = 60
             return
         }
 
@@ -246,45 +277,47 @@ function Invoke-WatchCheck([switch]$Manual) {
         try { $cred = Get-StoredCredential } catch { }
         if (-not $cred) { Set-Blocked 'no saved credentials (use "Sign in now" and save them)'; return }
 
-        $portal = $null
-        if ($probe.PortalUrl) { $portal = Resolve-PortalUrl $probe.PortalUrl }
-        if (-not $portal) { $cred.Password.Dispose(); Set-WatchState 'Captive' 'Problem' 'Signed out, but the portal address was not found' 'Warning'; return }
-        $W.LastPortal = $portal
-        if (-not [RvceWifi.Portal]::IsAllowed($portal)) { $cred.Password.Dispose(); Set-Blocked "unexpected portal address $($portal.Authority)"; return }
-
-        $page = Get-PortalPage $portal
-        if ($page.Cert -eq 'Untrusted') { $cred.Password.Dispose(); Set-Blocked 'portal certificate not confirmed yet'; return }
+        $page = Get-PortalPage (Get-PortalPageUrl)
+        if ($page.Cert -eq 'Untrusted') { $cred.Password.Dispose(); Set-Blocked 'portal certificate not confirmed yet (use "Sign in now")'; return }
         if ($page.Cert -eq 'Changed')   { $cred.Password.Dispose(); Set-Blocked 'portal certificate CHANGED - check with IT'; return }
         if ($page.Response.Status -eq 0) {
             $cred.Password.Dispose()
-            Set-WatchState 'Captive' 'Problem' 'Signed out, and the portal page is not responding' 'Warning'
+            Set-WatchState 'Unreachable' 'Problem' 'No internet and the portal is not responding' 'Warning'
+            $next = $cooldown * 60
             return
         }
-        $form = Get-LoginForm $page.Response.Body $portal
-        if (-not (Test-LoginForm $form)) { $cred.Password.Dispose(); Set-Blocked 'portal page not recognised (sign in in the browser)'; return }
 
-        Set-TrayState 'Working' 'Signing in again...'
+        Set-TrayState 'Working' 'Signing in...'
         $W.LastAttempt = Get-Date
         Write-RvceLog 'Signing in automatically with saved credentials (one attempt).'
-        $res = Submit-PortalLogin $portal $form $cred
+        $res = Invoke-SophosLogin $cred
         $cred.Password.Dispose()
 
         switch ($res.Result) {
-            'Online'   { $W.Failures = 0; Write-RvceLog 'Automatic sign-in succeeded.'; Set-WatchState 'Online' 'Online' 'Online (signed in again automatically)' 'Info' }
-            'Rejected' { Set-Blocked 'the portal rejected the saved credentials' }
+            'Online' {
+                $W.Failures = 0
+                Write-RvceLog 'Automatic sign-in succeeded.'
+                Set-WatchState 'Online' 'Online' 'Online (signed in automatically)' 'Info'
+                if ($cfg.UseKeepalive) { $W.NextKeepalive = (Get-Date).AddSeconds([int]$cfg.KeepaliveSeconds) }
+            }
+            'Rejected' { Set-Blocked "the portal rejected the saved credentials ($($res.Detail))" }
             default {
                 $W.Failures++
                 Write-RvceLog "Automatic sign-in failed: $($res.Result) $($res.Detail)"
                 if ($W.Failures -ge [int]$cfg.MaxAutoSignInFailures) { Set-Blocked "automatic sign-in failed $($W.Failures) times" }
-                else { Set-WatchState 'Retry' 'Problem' "Sign-in did not work ($($res.Result)); retrying in $cooldown min" 'Warning' }
+                else {
+                    Set-WatchState 'Retry' 'Problem' "Sign-in did not work ($($res.Result)); retrying in $cooldown min" 'Warning'
+                    $next = $cooldown * 60
+                }
             }
         }
     } catch {
         Write-RvceLog "Error during check: $($_.Exception.Message)"
         Set-TrayState 'Problem' 'Error during check (see log)'
+        $next = [int]$cfg.AutoSignInCooldownMinutes * 60
     } finally {
         $W.Busy = $false
-        $W.NextCheck = (Get-Date).AddSeconds([int]$cfg.WatchIntervalSeconds)
+        $W.NextCheck = (Get-Date).AddSeconds($next)
     }
 }
 
@@ -293,11 +326,26 @@ $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
     if ($stopEvent.WaitOne(0)) { Write-RvceLog 'Watcher stopped (stop requested).'; Exit-Watcher; return }
-    if ((Get-Date) -ge $W.NextCheck) { Invoke-WatchCheck }
+    if ($W.Busy) { return }
+    $now = Get-Date
+    # Every 15 s, look (locally) for a Wi-Fi change; if there is one, check a few seconds later.
+    if ($now -ge $W.NextNetLook) {
+        $W.NextNetLook = $now.AddSeconds(15)
+        $sig = Get-WifiSignature
+        if ($null -ne $W.NetSignature -and $sig -ne $W.NetSignature) {
+            Write-RvceLog 'Wi-Fi connection changed: checking shortly.'
+            $soon = $now.AddSeconds(5)
+            if ($W.NextCheck -gt $soon) { $W.NextCheck = $soon }
+        }
+        $W.NetSignature = $sig
+    }
+    if ($now -ge $W.NextCheck) { Invoke-WatchCheck; return }
+    if ($W.NextKeepalive -and $now -ge $W.NextKeepalive) { Invoke-Keepalive }
 })
 
-Write-RvceLog "Watcher started (checking every $($cfg.WatchIntervalSeconds)s)."
-Show-Note "Watching your RVCE connection every $($cfg.WatchIntervalSeconds) seconds. Right-click the tray dot for options."
+$mins = [math]::Round([int]$cfg.WatchIntervalSeconds / 60)
+Write-RvceLog "Watcher started (full check every $mins min; keep-alive $(if ($cfg.UseKeepalive) { "every $($cfg.KeepaliveSeconds) s" } else { 'off' }))."
+Show-Note "Watching your RVCE connection. Right-click the tray dot for options."
 $timer.Start()
 try {
     [Windows.Forms.Application]::Run()

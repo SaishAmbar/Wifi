@@ -330,6 +330,22 @@ namespace RvceWifi
             }
         }
 
+        // POSTs a form that contains no password (e.g. the Sophos sign-out). Same allow-list and pin rules.
+        public static HttpResult PostForm(string url, string referer, string[] names, string[] values, int timeoutMs)
+        {
+            Uri u = new Uri(url);
+            if (!IsAllowed(u))
+                throw new InvalidOperationException("Refusing to post to " + u.GetLeftPart(UriPartial.Authority));
+            if (string.IsNullOrEmpty(PinnedSha256))
+                throw new InvalidOperationException("Portal certificate has not been confirmed; refusing to post");
+
+            MemoryStream ms = new MemoryStream();
+            for (int i = 0; i < names.Length; i++) AppendField(ms, names[i], Encoding.UTF8.GetBytes(values[i] ?? ""));
+            HttpWebRequest r = Create(u, "POST", timeoutMs);
+            if (!string.IsNullOrEmpty(referer)) r.Referer = referer;
+            return Send(r, ms.ToArray());
+        }
+
         private static HttpResult Send(HttpWebRequest r, byte[] body)
         {
             HttpResult res = new HttpResult();

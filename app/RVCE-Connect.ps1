@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    Reconnects to the RVCE Wi-Fi and signs in to the RV Institutions captive portal
+    Reconnects to the RVCE Wi-Fi and signs in to the RV Institutions (Sophos) captive portal
     with your own institution account.
 
 .DESCRIPTION
     1. Checks that Windows is connected to the expected Wi-Fi network (config.json: Ssid)
        and offers to reconnect using your saved Windows Wi-Fi profile.
-    2. Detects a captive portal with one request to the Windows connectivity-check URL.
-    3. Sends your credentials ONCE, only to the allow-listed HTTPS portal
-       (config.json: PortalHost/PortalPort) whose certificate fingerprint you confirmed.
-    4. Verifies that internet access works afterwards.
+    2. Makes sure the portal's certificate has been confirmed by you (pinned in config.json).
+    3. Checks internet access with one request to the Windows connectivity-check URL.
+    4. If offline, signs in ONCE, only to the allow-listed HTTPS portal (config.json: PortalHost/PortalPort),
+       and verifies that internet access works afterwards.
 
 .PARAMETER Status            Only report status. Sends no credentials.
 .PARAMETER BrowserOnly       Open the portal in your default browser instead of signing in here.
@@ -105,9 +105,29 @@ function Read-ConsoleCredential {
     return [pscustomobject]@{ UserName = $user; Password = $pw; FromStore = $false }
 }
 
-function Get-BrowserTarget($probe) {
-    if ($probe.PortalUrl -and $probe.PortalUrl.Host -ieq $cfg.PortalHost) { return $probe.PortalUrl }
-    return [Uri]$cfg.BrowserFallbackUrl
+# Loads the portal page over pinned TLS, asking the user to confirm the certificate the first time.
+# Returns $null when the portal can be trusted and reached, otherwise an exit code.
+function Confirm-PortalTrust([bool]$MustReach) {
+    $page = Get-PortalPage (Get-PortalPageUrl)
+    if ($page.Cert -eq 'Untrusted') {
+        if ($Status) { Write-Warn2 'The portal certificate has not been confirmed yet. Run RVCE Connect to confirm it.'; return $null }
+        if (-not (Confirm-PinCertificate)) { Write-Warn2 'Certificate not trusted. Nothing was sent.'; return $EXIT_CANCEL }
+        $page = Get-PortalPage (Get-PortalPageUrl)
+    }
+    if ($page.Cert -eq 'Changed') {
+        Write-Fail 'The portal presented a DIFFERENT certificate than the one you confirmed earlier.'
+        Write-Info "Expected: $(Format-Fingerprint $cfg.PinnedCertSha256)"
+        Write-Info "Got     : $(Format-Fingerprint $page.SeenSha256)"
+        Write-Info 'This can happen if IT replaced the certificate, or if someone is impersonating the portal.'
+        Write-Info 'No credentials were sent. Verify with IT, then run with -ResetCertificatePin.'
+        return $EXIT_PORTAL
+    }
+    if ($page.Response.Status -eq 0 -and $MustReach) {
+        Write-Fail "The portal did not respond within $($cfg.TimeoutSeconds)s ($($page.Response.Error))."
+        Write-Info 'Try again in a minute, or use -BrowserOnly.'
+        return $EXIT_PORTAL
+    }
+    return $null
 }
 
 function Invoke-Main {
@@ -142,71 +162,26 @@ function Invoke-Main {
     }
     Write-Ok "Connected to '$($cfg.Ssid)'."
 
-    # 2. Internet / captive portal
+    # 2. Confirm the portal certificate once, even when already online, so the watcher can sign in later.
+    if ([string]::IsNullOrEmpty([string]$cfg.PinnedCertSha256)) {
+        Write-Step 'Checking the portal certificate...'
+        $code = Confirm-PortalTrust $false
+        if ($null -ne $code) { return $code }
+    }
+
+    # 3. Internet
     Write-Step 'Checking internet access...'
     $probe = Invoke-Probe
-    switch ($probe.State) {
-        'Online' { Write-Ok 'Internet access is working. Nothing to do.'; return $EXIT_OK }
-        'Unreachable' {
-            Write-Fail "No internet and no portal response ($($probe.Detail))."
-            Write-Info 'The network may still be assigning an address, or the portal may be down.'
-            if ($Status) { return $EXIT_PORTAL }
-            if (Confirm-RvceChoice 'No internet and the portal is not responding. Open the sign-in page in your browser instead?' $false) { Open-InBrowser ([Uri]$cfg.BrowserFallbackUrl) }
-            return $EXIT_PORTAL
-        }
-    }
-    $portal = $null
-    if ($probe.PortalUrl) { $portal = Resolve-PortalUrl $probe.PortalUrl }
-    if ($portal) { Write-Warn2 "Captive portal detected: $($portal.GetLeftPart([UriPartial]::Path))" }
-    else         { Write-Warn2 "Internet is blocked ($($probe.Detail)), but no portal address was found." }
-
+    if ($probe.State -eq 'Online') { Write-Ok 'Internet access is working. Nothing to do.'; return $EXIT_OK }
+    Write-Warn2 "Not signed in to the portal ($($probe.Detail))."
     if ($Status) { return $EXIT_PORTAL }
-    if ($BrowserOnly) { Write-Step 'Opening the portal in your default browser...'; Open-InBrowser (Get-BrowserTarget $probe); return $EXIT_OK }
+    if ($BrowserOnly) { Write-Step 'Opening the portal in your default browser...'; Open-InBrowser (Get-PortalPageUrl); return $EXIT_OK }
 
-    if (-not $portal -or -not [RvceWifi.Portal]::IsAllowed($portal)) {
-        if ($portal) {
-            Write-Fail "The portal address is not the official one in config.json ($($cfg.PortalHost):$($cfg.PortalPort) over HTTPS)."
-            Write-Info 'Credentials will NOT be sent. If IT changed the portal, update config.json.'
-        } else {
-            Write-Info 'Opening the browser so you can sign in manually.'
-            Open-InBrowser ([Uri]$cfg.BrowserFallbackUrl)
-        }
-        return $EXIT_PORTAL
-    }
+    # 4. Portal reachable and trusted?
+    $code = Confirm-PortalTrust $true
+    if ($null -ne $code) { return $code }
 
-    # 3. Load the sign-in page (pinned TLS)
-    Write-Step 'Loading the portal sign-in page...'
-    $page = Get-PortalPage $portal
-    if ($page.Cert -eq 'Untrusted') {
-        if (-not (Confirm-PinCertificate)) { Write-Warn2 'Certificate not trusted. Nothing was sent.'; return $EXIT_CANCEL }
-        $page = Get-PortalPage $portal
-    }
-    if ($page.Cert -eq 'Changed') {
-        Write-Fail 'The portal presented a DIFFERENT certificate than the one you confirmed earlier.'
-        Write-Info "Expected: $(Format-Fingerprint $cfg.PinnedCertSha256)"
-        Write-Info "Got     : $(Format-Fingerprint $page.SeenSha256)"
-        Write-Info 'This can happen if IT replaced the certificate, or if someone is impersonating the portal.'
-        Write-Info 'No credentials were sent. Verify with IT, then run with -ResetCertificatePin.'
-        return $EXIT_PORTAL
-    }
-    if ($page.Response.Status -eq 0) {
-        Write-Fail "The portal did not respond within $($cfg.TimeoutSeconds)s ($($page.Response.Error))."
-        Write-Info 'Try again in a minute, or use -BrowserOnly.'
-        return $EXIT_PORTAL
-    }
-    $form = Get-LoginForm $page.Response.Body $portal
-    if (-not $form) {
-        Write-Warn2 'Could not recognise a username/password form on the portal page. Opening it in your browser.'
-        Open-InBrowser $portal
-        return $EXIT_PORTAL
-    }
-    if (-not (Test-LoginForm $form)) {
-        Write-Fail 'The sign-in form does not POST to the official HTTPS portal. Credentials will NOT be sent.'
-        Open-InBrowser $portal
-        return $EXIT_PORTAL
-    }
-
-    # 4. Credentials
+    # 5. Credentials
     $cred = $null
     try { $cred = Get-StoredCredential } catch { Write-Warn2 "Could not read Windows Credential Manager: $($_.Exception.Message)" }
     if ($cred) { Write-Info 'Using credentials saved in Windows Credential Manager.' }
@@ -214,15 +189,14 @@ function Invoke-Main {
     else { $cred = Read-ConsoleCredential }
     if (-not $cred) { Write-Warn2 'Sign-in cancelled. Nothing was sent.'; return $EXIT_CANCEL }
 
-    # 5. Submit ONCE and verify
+    # 6. Sign in ONCE and verify
     Write-Step 'Signing in (one attempt) and verifying internet access...'
-    $res = Submit-PortalLogin $portal $form $cred
+    $res = Invoke-SophosLogin $cred
 
     switch ($res.Result) {
         'Online' {
             Write-Ok 'Signed in. Internet access is working.'
             Write-RvceLog 'Signed in (RVCE-Connect).'
-            if ($res.KeepaliveUrl) { Write-Info "Portal keep-alive page: $($res.KeepaliveUrl)" }
             if (-not $cred.FromStore) {
                 if (Confirm-RvceChoice 'Signed in. Save these credentials in Windows Credential Manager so the watcher can sign you in again automatically?' $false) {
                     try { [RvceWifi.CredMan]::Write([string]$cfg.CredentialTarget, $cred.UserName, $cred.Password); Write-Ok 'Saved (Credential Manager > Windows Credentials).' }
@@ -232,28 +206,28 @@ function Invoke-Main {
             $cred.Password.Dispose()
             return $EXIT_OK
         }
-        'Error' {
-            $cred.Password.Dispose()
-            Write-Fail "Sign-in was not sent: $($res.Detail)"
-            return $EXIT_PORTAL
-        }
         'Rejected' {
             $cred.Password.Dispose()
-            Write-Fail 'The portal rejected the sign-in (wrong username/password, expired account, or session limit).'
-            if ($cred.FromStore) { Write-Info 'The saved credential may be outdated. Remove it with:  RVCE-Connect.cmd -ForgetCredential' }
+            Write-Fail "The portal rejected the sign-in: $($res.Detail)"
+            if ($cred.FromStore) { Write-Info 'If your password changed, remove the saved one with:  app\RVCE-Connect.cmd -ForgetCredential' }
             Write-Info 'Not retrying automatically, to avoid repeated submissions / account lockout.'
             return $EXIT_AUTH
         }
         'Timeout' {
             $cred.Password.Dispose()
-            Write-Fail "The portal did not answer within $($cfg.TimeoutSeconds)s ($($res.Detail)) and internet access is still not working."
+            Write-Fail "The portal did not answer within $($cfg.TimeoutSeconds)s ($($res.Detail))."
             Write-Info 'Not re-sending. Wait a minute and run again, or use -BrowserOnly.'
+            return $EXIT_PORTAL
+        }
+        'Error' {
+            $cred.Password.Dispose()
+            Write-Fail "Sign-in did not work: $($res.Detail)"
             return $EXIT_PORTAL
         }
         default {
             $cred.Password.Dispose()
-            Write-Fail 'Credentials were submitted, but internet access still does not work.'
-            Write-Info 'The portal may need more time, or the account may lack access. Try -Status in a minute, or -BrowserOnly.'
+            Write-Fail $res.Detail
+            Write-Info 'Try -Status in a minute, or -BrowserOnly.'
             return $EXIT_VERIFY
         }
     }
@@ -275,7 +249,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Write-Host '   Background watcher is already running (tray icon).'
             } catch {
                 Start-RvceWatcher $watchScript
-                Write-Host '[OK] Background watcher started: it checks every minute (tray icon). Stop it with RVCE-Stop.exe.' -ForegroundColor Green
+                Write-Host '[OK] Background watcher started (tray icon). Stop it with RVCE-Stop.exe.' -ForegroundColor Green
             }
             $watching = $true
         }

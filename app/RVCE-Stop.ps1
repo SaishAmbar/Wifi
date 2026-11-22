@@ -1,13 +1,14 @@
 <#
 .SYNOPSIS
-    Stops the RVCE background watcher. You stay signed in to the portal.
-.PARAMETER SignOut  Also sign out of the RV Institutions captive portal.
-.PARAMETER Gui      Show the result in a dialog box instead of the console (used when double-clicked).
+    Disconnects: stops the RVCE background watcher (so it cannot sign you straight back in)
+    and signs you out of the RV Institutions (Sophos) portal.
+.PARAMETER WatcherOnly  Only stop the watcher; stay signed in to the portal.
+.PARAMETER Gui          Show the result in a dialog box instead of the console (used when double-clicked).
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [switch] $SignOut,
+    [switch] $WatcherOnly,
     [switch] $Gui,
     [string] $ConfigPath = ''
 )
@@ -32,27 +33,26 @@ function Finish([string]$text, [string]$icon, [int]$code) {
 try {
     $wasRunning = Stop-RvceWatcher
 
-    if (-not $SignOut) {
+    if ($WatcherOnly) {
         if ($wasRunning) { Finish 'Watcher stopped.' 'Information' 0 }
         Finish 'Watcher was not running.' 'Information' 0
     }
 
-    # Optional: also sign out of the portal.
     $cfg = Read-RvceConfig $ConfigPath
     $TimeoutMs = [int]$cfg.TimeoutSeconds * 1000
     Initialize-RvceHelper $cfg
 
     if (-not (Test-ExpectedSsid (Get-WifiState))) {
         Clear-RvceSession
-        Finish "Watcher stopped.`n`nNot connected to '$($cfg.Ssid)', so there is no portal session to sign out of." 'Information' 0
+        Finish "Watcher stopped.`nNot on the $($cfg.Ssid) Wi-Fi." 'Information' 0
     }
     if ((Invoke-Probe).State -ne 'Online') {
         Clear-RvceSession
-        Finish "Watcher stopped.`n`nYou are already signed out of the portal." 'Information' 0
+        Finish 'Disconnected.' 'Information' 0
     }
     $r = Invoke-PortalLogout
-    if ($r.Ok) { Finish "Watcher stopped.`n`n$($r.Message)" 'Information' 0 }
-    Finish "Watcher stopped, but signing out did not work.`n`n$($r.Message)" 'Warning' 2
+    if ($r.Ok) { Finish 'Disconnected.' 'Information' 0 }
+    Finish "Watcher stopped, but sign-out did not work.`n`n$($r.Message)" 'Warning' 2
 } catch {
     Finish "Unexpected error:`n`n$($_.Exception.Message)" 'Error' 2
 }
