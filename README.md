@@ -111,13 +111,13 @@ It starts automatically after RVCE Connect finds you online. A coloured dot appe
 | Grey | Not on RVCE (for example at home, or on a hotspot). The watcher leaves everything alone. |
 
 While you're on RVCE it:
-- checks internet access **every 25 minutes** (`WatchIntervalSeconds`), and a few seconds after your Wi-Fi
+- checks internet access **every 30 minutes** (`WatchIntervalSeconds`), and a few seconds after your Wi-Fi
   connection changes (joining RVCE, waking from sleep). Noticing the change is purely local; it sends nothing;
 - only signs in **if you're not signed in**, once, using the credentials saved in Credential Manager;
 - sends the portal's own **keep-alive** to the firewall every 3 minutes (`KeepaliveSeconds`). This is exactly what
   the Sophos sign-in tab does in your browser ("do not close this page"); it is a tiny request to the firewall on
   the campus network, not to the internet. If the firewall answers that you've been signed out, the watcher signs
-  you back in immediately instead of waiting 25 minutes. Turn it off with `"UseKeepalive": false`.
+  you back in immediately instead of waiting 30 minutes. Turn it off with `"UseKeepalive": false`.
 
 On any other Wi-Fi network (or with Wi-Fi off) it does nothing at all.
 
@@ -167,7 +167,7 @@ Disconnect and exit, Exit (stay signed in). Double-clicking the dot runs a check
 
 `app\config.json` is created from `app\config.default.json` the first time you run the tool. Edit your
 `config.json`, not the default (the default is what other people get). Old FortiGate-era settings
-(`172.16.0.2:1003`, 60-second checks) are migrated automatically.
+(`172.16.0.2:1003`, 60-second checks) and the earlier 25-minute default are migrated automatically.
 
 | Key | Meaning |
 |---|---|
@@ -176,7 +176,7 @@ Disconnect and exit, Exit (stay signed in). Double-clicking the dot runs a check
 | `PinnedCertSha256` | Filled in automatically when you confirm the certificate. |
 | `CredentialTarget` | Name of the Credential Manager entry. |
 | `TimeoutSeconds`, `VerifyAttempts`, `VerifyIntervalSeconds` | Network timeout and how long to keep checking after sign-in. |
-| `WatchIntervalSeconds` | How often the watcher does a full internet check (default 1500 = 25 min, minimum 60). |
+| `WatchIntervalSeconds` | How often the watcher does a full internet check (default 1800 = 30 min, minimum 60). |
 | `UseKeepalive`, `KeepaliveSeconds` | Whether and how often the watcher sends the portal's keep-alive (default on, 180 s). |
 | `AutoSignInCooldownMinutes`, `MaxAutoSignInFailures` | Watcher limits on automatic sign-in (defaults 5 and 3). |
 

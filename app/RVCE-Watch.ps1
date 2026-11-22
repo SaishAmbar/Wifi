@@ -5,7 +5,7 @@
 .DESCRIPTION
     Only acts while you are on the RVCE Wi-Fi; on any other network (or with Wi-Fi off) it stays idle.
     On RVCE it:
-      - checks internet access every WatchIntervalSeconds (default 1500 = 25 min), and a few seconds
+      - checks internet access every WatchIntervalSeconds (default 1800 = 30 min), and a few seconds
         after the Wi-Fi connection changes (joining RVCE, waking from sleep). Change detection is local
         and sends nothing over the network;
       - while signed in, sends the portal's own keep-alive to the firewall every KeepaliveSeconds

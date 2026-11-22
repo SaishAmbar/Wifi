@@ -72,7 +72,7 @@ custom fixed-width WinForms dialog, width `$RvceDialogWidth`), and Yes/No prompt
 (`Stop-RvceWatcher` then waits on the mutex). Mutable state lives in the `$W` hashtable because event-handler
 script blocks can't assign script-scope variables. Each tick: every 15 s compare a local Wi-Fi signature
 (`Get-WifiSignature`) and schedule a check 5 s after a change; run the full check (`Invoke-WatchCheck`) when
-`NextCheck` is due (25 min when online, cooldown after failures); otherwise send a keep-alive when due, which triggers
+`NextCheck` is due (30 min when online, cooldown after failures); otherwise send a keep-alive when due, which triggers
 an immediate full check on `nack`/failure. Off the RVCE SSID it stays idle. Auto sign-in safeguards (cooldown, block
 on rejection/cert change/repeated failure until "Sign in now") are deliberate; keep them.
 

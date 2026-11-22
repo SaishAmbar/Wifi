@@ -176,7 +176,7 @@ $RvceDefaults = [ordered]@{
     ProbeUrl = 'http://www.msftconnecttest.com/connecttest.txt'
     ProbeExpectedBody = 'Microsoft Connect Test'
     TimeoutSeconds = 10; VerifyAttempts = 5; VerifyIntervalSeconds = 2
-    WatchIntervalSeconds = 1500; UseKeepalive = $true; KeepaliveSeconds = 180
+    WatchIntervalSeconds = 1800; UseKeepalive = $true; KeepaliveSeconds = 180
     AutoSignInCooldownMinutes = 5; MaxAutoSignInFailures = 3
 }
 
@@ -197,13 +197,13 @@ function Read-RvceConfig([string]$Path) {
             $changed = $true
         }
     }
-    # Migrate configs from the FortiGate era (portal 172.16.0.2:1003, checks every 60 s) to the Sophos portal.
+    # Migrate configs from the FortiGate era (portal 172.16.0.2:1003, checks every 60 s) and the first Sophos default (1500 s) to the Sophos portal.
     # The old certificate pin belongs to the old portal, so it is cleared and confirmed again on the next run.
     if ($c.PortalHost -eq '172.16.0.2' -and [int]$c.PortalPort -eq 1003) {
         $c.PortalHost = $RvceDefaults.PortalHost; $c.PortalPort = $RvceDefaults.PortalPort; $c.PinnedCertSha256 = ''
         $changed = $true
     }
-    if ([int]$c.WatchIntervalSeconds -eq 60) { $c.WatchIntervalSeconds = $RvceDefaults.WatchIntervalSeconds; $changed = $true }
+    if (@(60, 1500) -contains [int]$c.WatchIntervalSeconds) { $c.WatchIntervalSeconds = $RvceDefaults.WatchIntervalSeconds; $changed = $true }
     if ($c.PSObject.Properties.Name -contains 'BrowserFallbackUrl') { $c.PSObject.Properties.Remove('BrowserFallbackUrl'); $changed = $true }
     if ($changed) {
         try { Save-RvceConfig $c $Path; Write-RvceLog 'config.json updated (Sophos portal defaults).' } catch { }

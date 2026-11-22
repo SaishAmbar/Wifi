@@ -9,7 +9,7 @@
     "TimeoutSeconds":  10,
     "VerifyAttempts":  5,
     "VerifyIntervalSeconds":  2,
-    "WatchIntervalSeconds":  1500,
+    "WatchIntervalSeconds":  1800,
     "UseKeepalive":  true,
     "KeepaliveSeconds":  180,
     "AutoSignInCooldownMinutes":  5,
