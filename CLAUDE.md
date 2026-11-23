@@ -55,7 +55,10 @@ custom fixed-width WinForms dialog, width `$RvceDialogWidth`), and Yes/No prompt
 **`RvceHelper.cs`** (compiled by `Initialize-RvceHelper` via `Add-Type`) holds everything security-sensitive:
 - `Portal`: HTTP via `HttpWebRequest` with a per-request certificate callback. HTTPS is accepted **only** for
   `AllowedHost:AllowedPort` presenting the SHA-256 in `PinnedSha256` (trust-on-first-use, confirmed by the user and
-  stored in `config.json`). `PostLogin` builds the form body from a `SecureString` and wipes it; `PostForm` is for
+  stored in `config.json`). Once a pin exists, `IsTrustedRenewal` also accepts a certificate whose SAN lists
+  `TrustedName` (config `PortalCertName`, the portal's Let's Encrypt name) and that chains to a trusted root (only the
+  IP name mismatch is tolerated); it sets `RenewedSha256`, and `Update-RenewedPin` (called after every portal
+  request) re-pins and logs it. `PostLogin` builds the form body from a `SecureString` and wipes it; `PostForm` is for
   password-less posts. Both refuse non-allow-listed URLs or a missing pin.
 - `CredMan` (Windows Credential Manager, generic credential `RVCE-Connect:CaptivePortal`) and `CredPrompt`
   (CredUI dialog owned by the always-on-top owner window so it can't open behind other windows).

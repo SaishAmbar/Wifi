@@ -3,6 +3,7 @@
     "PortalHost":  "172.16.0.4",
     "PortalPort":  8090,
     "PinnedCertSha256":  "",
+    "PortalCertName":  "rvce-fw.rvce.edu.in",
     "CredentialTarget":  "RVCE-Connect:CaptivePortal",
     "ProbeUrl":  "http://www.msftconnecttest.com/connecttest.txt",
     "ProbeExpectedBody":  "Microsoft Connect Test",

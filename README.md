@@ -64,11 +64,15 @@ Double-click **RVCE Connect** on the desktop. No window opens; when it's done yo
 What happens:
 
 1. **Wi-Fi check.** If you are not on `RVCE`, it asks whether to connect using your saved Wi-Fi profile.
-2. **First run only: certificate check.** The portal uses a certificate Windows doesn't trust (that is why
-   Chrome shows "Not secure"). The tool shows the certificate's SHA-256 fingerprint and asks you to confirm
-   (No is the default; in the console you type `YES`). To check it, open `https://172.16.0.4:8090/httpclient.html`
-   in Chrome, click **Not secure > Certificate is not valid > Details** and compare the SHA-256 fingerprint, or ask IT.
-   After that, the tool refuses any portal that presents a different certificate.
+2. **First run only: certificate check.** The portal is reached by IP address, so its certificate doesn't match
+   the address (that is why Chrome shows "Not secure"). The tool shows the certificate's SHA-256 fingerprint and
+   asks you to confirm (No is the default; in the console you type `YES`). To check it, open
+   `https://172.16.0.4:8090/httpclient.html` in Chrome, click **Not secure > Certificate is not valid > Details**
+   and compare the SHA-256 fingerprint, or ask IT.
+   After that, the tool refuses any portal that presents a different certificate, with one exception: routine
+   **renewals**. The portal's certificate (Let's Encrypt, for `rvce-fw.rvce.edu.in`) is replaced every couple of
+   months. A new certificate is accepted without asking only if it is issued to `rvce-fw.rvce.edu.in` and chains to a
+   certificate authority Windows trusts; the saved fingerprint is then updated and the change is noted in `watch.log`.
 3. **Internet check.** One request to Windows' own connectivity-check URL (`http://www.msftconnecttest.com/connecttest.txt`).
    If you are already online it skips straight to starting the watcher.
 4. **Sign-in.** It uses credentials saved in Windows Credential Manager, or shows the standard Windows credential
@@ -148,7 +152,7 @@ Disconnect and exit, Exit (stay signed in). Double-clicking the dot runs a check
   The tool never writes your password to a file, never prints it, and never logs it. In memory the password stays a
   `SecureString`, and the request body containing it is wiped right after it is sent.
 - **Credentials go only to the official portal**: HTTPS, host `172.16.0.4`, port `8090`, with the certificate
-  you confirmed. Anything else is refused.
+  you confirmed (or a publicly trusted renewal of it for `rvce-fw.rvce.edu.in`). Anything else is refused.
 - **One attempt per run.** Timeouts and rejections are reported, never retried immediately, so your account
   can't be locked out by repeated submissions.
 - **Network traffic:** the Microsoft connectivity-check URL and the RVCE portal only. Nothing else is probed or scanned.
@@ -173,7 +177,8 @@ Disconnect and exit, Exit (stay signed in). Double-clicking the dot runs a check
 |---|---|
 | `Ssid` | Expected Wi-Fi name (`RVCE`). |
 | `PortalHost`, `PortalPort` | The only place credentials may be sent (`172.16.0.4`, `8090`). Change only if RVCE IT changes the portal. |
-| `PinnedCertSha256` | Filled in automatically when you confirm the certificate. |
+| `PinnedCertSha256` | Filled in automatically when you confirm the certificate, and updated on renewals. |
+| `PortalCertName` | Name a renewed portal certificate must be issued to (`rvce-fw.rvce.edu.in`). Set to `""` to be asked about every new certificate. |
 | `CredentialTarget` | Name of the Credential Manager entry. |
 | `TimeoutSeconds`, `VerifyAttempts`, `VerifyIntervalSeconds` | Network timeout and how long to keep checking after sign-in. |
 | `WatchIntervalSeconds` | How often the watcher does a full internet check (default 1800 = 30 min, minimum 60). |
@@ -187,7 +192,7 @@ keep-alive and sign-out; no password).
 ## Troubleshooting
 
 - **"Connected to Wi-Fi, but the network name could not be read"**: turn on Location access (see Permissions).
-- **"Different certificate"**: don't sign in. Check with IT. If the change is genuine, run `app\RVCE-Connect.cmd -ResetCertificatePin`.
+- **"Different certificate"**: it is not a trusted renewal for `rvce-fw.rvce.edu.in`, so don't sign in. Check with IT. If the change is genuine, run `app\RVCE-Connect.cmd -ResetCertificatePin`.
 - **Sign-in rejected**: the dialog shows the portal's reason. If your password changed, run `app\RVCE-Connect.cmd -ForgetCredential`
   and sign in again.
 - **"extra verification step"**: the portal asked for something this tool doesn't support (for example a one-time code).

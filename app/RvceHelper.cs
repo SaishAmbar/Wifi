@@ -202,6 +202,12 @@ namespace RvceWifi
         public static string AllowedHost = "";
         public static int AllowedPort = 0;
         public static string PinnedSha256 = "";
+        // Renewals: once a pin exists, a different certificate is also accepted if it is issued to this DNS name
+        // and chains to a root Windows trusts (e.g. the portal's 90-day Let's Encrypt certificate being renewed).
+        // Empty = never accept anything but the pinned certificate.
+        public static string TrustedName = "";
+        // Set when a certificate was accepted by the renewal rule, so the script can update the pin.
+        public static string RenewedSha256;
 
         // Details of the last certificate seen, so the script can show it to the user for pinning.
         public static string LastCertSha256;
@@ -247,7 +253,70 @@ namespace RvceWifi
             HttpWebRequest req = sender as HttpWebRequest;
             if (req == null || !IsAllowed(req.RequestUri)) return false;
             if (string.IsNullOrEmpty(PinnedSha256)) return false; // not yet trusted by the user
-            return string.Equals(LastCertSha256, PinnedSha256, StringComparison.OrdinalIgnoreCase);
+            if (string.Equals(LastCertSha256, PinnedSha256, StringComparison.OrdinalIgnoreCase)) return true;
+            if (IsTrustedRenewal(cert, errors))
+            {
+                RenewedSha256 = LastCertSha256;
+                return true;
+            }
+            return false;
+        }
+
+        // A renewed certificate: publicly trusted chain for server authentication, issued to TrustedName.
+        // The only policy error allowed is the name mismatch caused by reaching the portal by IP address.
+        public static bool IsTrustedRenewal(X509Certificate cert, SslPolicyErrors errors)
+        {
+            if (string.IsNullOrEmpty(TrustedName)) return false;
+            if ((errors & ~SslPolicyErrors.RemoteCertificateNameMismatch) != SslPolicyErrors.None) return false;
+            X509Certificate2 c2 = new X509Certificate2(cert);
+            if (!HasDnsName(c2, TrustedName)) return false;
+            using (X509Chain ch = new X509Chain())
+            {
+                ch.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck; // no internet before sign-in
+                ch.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1")); // serverAuth
+                return ch.Build(c2);
+            }
+        }
+
+        // True if the certificate's Subject Alternative Name extension lists exactly this DNS name.
+        public static bool HasDnsName(X509Certificate2 cert, string name)
+        {
+            foreach (X509Extension ext in cert.Extensions)
+            {
+                if (ext.Oid == null || ext.Oid.Value != "2.5.29.17") continue;
+                byte[] d = ext.RawData;
+                int pos = 0;
+                if (d.Length < 2 || d[pos++] != 0x30) return false;
+                int end = ReadLength(d, ref pos);
+                if (end < 0) return false;
+                end += pos;
+                if (end > d.Length) return false;
+                while (pos < end)
+                {
+                    byte tag = d[pos++];
+                    int len = ReadLength(d, ref pos);
+                    if (len < 0 || pos + len > end) return false;
+                    if (tag == 0x82) // dNSName
+                    {
+                        string dns = Encoding.ASCII.GetString(d, pos, len);
+                        if (string.Equals(dns, name, StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                    pos += len;
+                }
+            }
+            return false;
+        }
+
+        private static int ReadLength(byte[] d, ref int pos)
+        {
+            if (pos >= d.Length) return -1;
+            int b = d[pos++];
+            if (b < 0x80) return b;
+            int n = b & 0x7F;
+            if (n < 1 || n > 3 || pos + n > d.Length) return -1;
+            int len = 0;
+            for (int i = 0; i < n; i++) len = (len << 8) | d[pos++];
+            return len;
         }
 
         private static HttpWebRequest Create(Uri uri, string method, int timeoutMs)

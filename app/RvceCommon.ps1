@@ -172,6 +172,7 @@ function Write-RvceLog([string]$msg) {
 # ---------------------------------------------------------------- configuration
 $RvceDefaults = [ordered]@{
     Ssid = 'RVCE'; PortalHost = '172.16.0.4'; PortalPort = 8090; PinnedCertSha256 = ''
+    PortalCertName = 'rvce-fw.rvce.edu.in'
     CredentialTarget = 'RVCE-Connect:CaptivePortal'
     ProbeUrl = 'http://www.msftconnecttest.com/connecttest.txt'
     ProbeExpectedBody = 'Microsoft Connect Test'
@@ -238,12 +239,23 @@ function Initialize-RvceHelper($c) {
     [RvceWifi.Portal]::AllowedHost  = [string]$c.PortalHost
     [RvceWifi.Portal]::AllowedPort  = [int]$c.PortalPort
     [RvceWifi.Portal]::PinnedSha256 = [string]$c.PinnedCertSha256
+    [RvceWifi.Portal]::TrustedName  = [string]$c.PortalCertName
 }
 
 function Set-PinnedCertificate([string]$sha) {
     $cfg.PinnedCertSha256 = $sha
     [RvceWifi.Portal]::PinnedSha256 = $sha
     Save-RvceConfig $cfg $ConfigPath
+}
+
+# If the last request accepted a renewed portal certificate (see Portal.IsTrustedRenewal), pin the new one.
+function Update-RenewedPin {
+    $new = [RvceWifi.Portal]::RenewedSha256
+    [RvceWifi.Portal]::RenewedSha256 = $null
+    if ($new -and $new -ine [string]$cfg.PinnedCertSha256) {
+        try { Set-PinnedCertificate $new } catch { }
+        Write-RvceLog "Portal certificate renewed ($($cfg.PortalCertName)); new SHA-256 $(Format-Fingerprint $new)."
+    }
 }
 
 # ---------------------------------------------------------------- Wi-Fi
@@ -322,6 +334,7 @@ function Format-Fingerprint([string]$hex) {
 function Get-PortalPage([Uri]$u) {
     [RvceWifi.Portal]::ResetLastCert()
     $r = [RvceWifi.Portal]::Get($u.AbsoluteUri, $TimeoutMs)
+    Update-RenewedPin
     $seen = [RvceWifi.Portal]::LastCertSha256
     $cert = 'Ok'
     if ($r.Status -eq 0 -and $seen -and $seen -ine [string]$cfg.PinnedCertSha256) {
@@ -340,6 +353,7 @@ function Invoke-SophosLogin($Cred) {
         $resp = [RvceWifi.Portal]::PostLogin((Get-PortalBase) + '/login.xml', (Get-PortalPageUrl).AbsoluteUri,
             [string[]]@('mode', 'a', 'producttype'), [string[]]@('191', (Get-SophosTime), '0'),
             'username', $user, 'password', $Cred.Password, $TimeoutMs)
+        Update-RenewedPin
     } catch {
         $res.Result = 'Error'; $res.Detail = $_.Exception.Message
         return $res
@@ -377,6 +391,7 @@ function Invoke-SophosLogin($Cred) {
 function Send-SophosKeepalive([string]$user) {
     $q = 'mode=192&username=' + [Uri]::EscapeDataString($user.ToLowerInvariant()) + '&a=' + (Get-SophosTime) + '&producttype=0'
     $r = [RvceWifi.Portal]::Get((Get-PortalBase) + '/live?' + $q, $TimeoutMs)
+    Update-RenewedPin
     if ($r.Status -ne 200) { return 'Failed' }
     switch (Get-SophosTag $r.Body 'ack') {
         'ack'         { return 'Ok' }
@@ -401,6 +416,7 @@ function Invoke-PortalLogout {
         [RvceWifi.Portal]::ResetLastCert()
         $r = [RvceWifi.Portal]::PostForm((Get-PortalBase) + '/logout.xml', (Get-PortalPageUrl).AbsoluteUri,
             [string[]]@('mode', 'username', 'a', 'producttype'), [string[]]@('193', $user.Replace("'", "''"), (Get-SophosTime), '0'), $TimeoutMs)
+        Update-RenewedPin
     } catch {
         return [pscustomobject]@{ Ok = $false; Message = $_.Exception.Message }
     }
