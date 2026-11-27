@@ -76,7 +76,9 @@ custom fixed-width WinForms dialog, width `$RvceDialogWidth`), and Yes/No prompt
 script blocks can't assign script-scope variables. Each tick: every 15 s compare a local Wi-Fi signature
 (`Get-WifiSignature`) and schedule a check 5 s after a change; run the full check (`Invoke-WatchCheck`) when
 `NextCheck` is due (30 min when online, cooldown after failures); otherwise send a keep-alive when due, which triggers
-an immediate full check on `nack`/failure. Off the RVCE SSID it stays idle. Auto sign-in safeguards (cooldown, block
+an immediate full check on `nack`/failure. On another SSID (or Wi-Fi off) it stays idle; with no Wi-Fi connection it
+calls `Request-RvceWifi` (netsh, saved profile), sets `JoinPending`, and reports `NotFound` (retry every 60 s) if the
+next check is still not on RVCE. Setup.cmd installs a Startup shortcut (`RVCE-Watch.ps1 -InstallStartup`). Auto sign-in safeguards (cooldown, block
 on rejection/cert change/repeated failure until "Sign in now") are deliberate; keep them.
 
 **Config.** `app/config.default.json` is shipped; each user's `app/config.json` (git-ignored, holds their pin) is

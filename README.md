@@ -63,7 +63,7 @@ Double-click **RVCE Connect** on the desktop. No window opens; when it's done yo
 
 What happens:
 
-1. **Wi-Fi check.** If you are not on `RVCE`, it asks whether to connect using your saved Wi-Fi profile.
+1. **Wi-Fi check.** If you are not on `RVCE`, it connects using your saved Wi-Fi profile, without asking.
 2. **First run only: certificate check.** The portal is reached by IP address, so its certificate doesn't match
    the address (that is why Chrome shows "Not secure"). The tool shows the certificate's SHA-256 fingerprint and
    asks you to confirm (No is the default; in the console you type `YES`). To check it, open
@@ -94,7 +94,7 @@ Run these from a terminal in the tool's folder. They print to the console instea
 | `app\RVCE-Connect.cmd -Status` | Only report Wi-Fi and internet/portal status. Never sends credentials. |
 | `app\RVCE-Connect.cmd -BrowserOnly` | Open the portal's sign-in page in your default browser (sign in there yourself). |
 | `app\RVCE-Connect.cmd -NoWatch` | Sign in without starting the background watcher. |
-| `app\RVCE-Connect.cmd -NoReconnect` | Don't offer to reconnect the Wi-Fi. |
+| `app\RVCE-Connect.cmd -NoReconnect` | Don't connect to the Wi-Fi automatically. |
 | `app\RVCE-Connect.cmd -ForgetCredential` | Delete the saved credential from Credential Manager. |
 | `app\RVCE-Connect.cmd -ResetCertificatePin` | Forget the confirmed certificate (for example after IT replaces it). |
 | `app\RVCE-Connect.cmd -InstallStartup` | Start the watcher automatically when you log in (`-RemoveStartup` to undo). |
@@ -104,15 +104,16 @@ Run these from a terminal in the tool's folder. They print to the console instea
 
 ## Background watcher
 
-It starts automatically after RVCE Connect finds you online. A coloured dot appears in the system tray
-(it may be under the `^` arrow):
+It starts when you log in to Windows (Setup adds it to Startup; `-RemoveStartup` undoes that), and after
+RVCE Connect finds you online. It keeps running until you choose **Exit** from its tray menu or use RVCE
+Disconnect. A coloured dot appears in the system tray (it may be under the `^` arrow):
 
 | Dot | Meaning |
 |---|---|
 | Green | On RVCE and online. |
 | Amber | Signing in, or waiting before retrying. |
-| Red | A problem needs you: Wi-Fi dropped, the portal isn't responding, or automatic sign-in is paused. |
-| Grey | Not on RVCE (for example at home, or on a hotspot). The watcher leaves everything alone. |
+| Red | A problem needs you: RVCE Wi-Fi not found, the portal isn't responding, or automatic sign-in is paused. |
+| Grey | On another network (for example at home, or on a hotspot), or Wi-Fi is off. The watcher leaves everything alone. |
 
 While you're on RVCE it:
 - checks internet access **every 30 minutes** (`WatchIntervalSeconds`), and a few seconds after your Wi-Fi
@@ -123,7 +124,11 @@ While you're on RVCE it:
   the campus network, not to the internet. If the firewall answers that you've been signed out, the watcher signs
   you back in immediately instead of waiting 30 minutes. Turn it off with `"UseKeepalive": false`.
 
-On any other Wi-Fi network (or with Wi-Fi off) it does nothing at all.
+When you're **not connected to any Wi-Fi** (for example after waking from sleep), it joins `RVCE` using your
+saved Windows Wi-Fi profile. If RVCE isn't in range it shows a warning once and quietly tries again every minute.
+
+On any other Wi-Fi network (or with Wi-Fi switched off) it does nothing at all; it never switches you away from
+another network. To move to RVCE, double-click **RVCE Connect**.
 
 It needs saved credentials: answer **Yes** when RVCE Connect offers to save them after a sign-in.
 

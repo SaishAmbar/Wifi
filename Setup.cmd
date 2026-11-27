@@ -10,6 +10,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\RVCE-Watch.ps1" -InstallStartup
 echo.
 echo Done. Double-click "RVCE Connect" on your desktop to sign in to the RVCE Wi-Fi.
 echo (Its first run asks you to confirm the portal certificate and enter your own RVCE username and password.)

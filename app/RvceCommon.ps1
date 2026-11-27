@@ -260,11 +260,12 @@ function Update-RenewedPin {
 
 # ---------------------------------------------------------------- Wi-Fi
 function Get-WifiState {
-    $state = [pscustomobject]@{ HasWifi = $true; Connected = $false; Ssid = $null; Source = 'netsh'; LocationBlocked = $false }
+    $state = [pscustomobject]@{ HasWifi = $true; Connected = $false; Ssid = $null; Source = 'netsh'; LocationBlocked = $false; RadioOff = $false }
     $out = ''
     try { $out = (& netsh.exe wlan show interfaces 2>&1 | Out-String) } catch { $out = '' }
 
     if ($out -match '(?i)There is no wireless interface') { $state.HasWifi = $false; return $state }
+    if ($out -match '(?i)\b(Software|Hardware) Off\b') { $state.RadioOff = $true }   # Wi-Fi switched off / airplane mode
     if ($out -match '(?i)location permission|location services') { $state.LocationBlocked = $true }
 
     $st = [regex]::Match($out, '(?m)^\s*State\s*:\s*(.+?)\s*$')
@@ -285,6 +286,16 @@ function Get-WifiState {
         } catch { }
     }
     return $state
+}
+
+# Asks Windows to join the expected Wi-Fi with the user's saved profile. Returns immediately:
+# 'Requested' (check Get-WifiState a few seconds later) or 'NoProfile'.
+function Request-RvceWifi {
+    $ssid = [string]$cfg.Ssid
+    & netsh.exe wlan show profiles "name=$ssid" *> $null
+    if ($LASTEXITCODE -ne 0) { return 'NoProfile' }
+    & netsh.exe wlan connect "name=$ssid" *> $null
+    return 'Requested'
 }
 
 function Test-ExpectedSsid($state) {

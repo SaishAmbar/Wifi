@@ -3,7 +3,9 @@
     Background watcher for the RVCE Wi-Fi (Sophos portal). Lives in the system tray.
 
 .DESCRIPTION
-    Only acts while you are on the RVCE Wi-Fi; on any other network (or with Wi-Fi off) it stays idle.
+    On any other Wi-Fi network (or with Wi-Fi switched off) it stays idle; use the RVCE Connect shortcut to switch.
+    When not connected to any network (e.g. after waking from sleep) it joins RVCE with your saved Windows
+    Wi-Fi profile, and shows a warning (retrying every minute) if RVCE is not in range.
     On RVCE it:
       - checks internet access every WatchIntervalSeconds (default 1800 = 30 min), and a few seconds
         after the Wi-Fi connection changes (joining RVCE, waking from sleep). Change detection is local
@@ -94,7 +96,7 @@ try {
 $W = @{
     State = 'Starting'; Busy = $false; NextCheck = (Get-Date); NextKeepalive = $null
     NextNetLook = (Get-Date); NetSignature = $null
-    LastAttempt = $null; Failures = 0; Blocked = $null
+    LastAttempt = $null; Failures = 0; Blocked = $null; JoinPending = $false
 }
 
 # Wi-Fi adapters that are up, with their IPv4 addresses. Purely local; used to notice network changes.
@@ -240,15 +242,33 @@ function Invoke-WatchCheck([switch]$Manual) {
             }
         } catch { }
 
-        # Wi-Fi: on any other network (or none), leave everything as it is.
+        # Wi-Fi: on another network, leave it alone (use the RVCE Connect shortcut to switch).
+        # Not connected to any network: join RVCE with the saved Windows profile.
         $wifi = Get-WifiState
+        $justJoined = $W.JoinPending
         if (-not (Test-ExpectedSsid $wifi)) {
-            if ($wifi.Connected -and $wifi.Ssid) { Set-WatchState 'Away' 'Away' "On '$($wifi.Ssid)' (not $($cfg.Ssid)) - idle" }
-            elseif ($wifi.Connected)            { Set-WatchState 'Away' 'Away' 'Wi-Fi name unreadable (Location off?) - idle' }
-            elseif ($wasOnRvce)                 { Set-WatchState 'WifiDown' 'Problem' "Disconnected from $($cfg.Ssid) Wi-Fi" 'Warning' }
-            else                                { Set-WatchState 'WifiDown' 'Away' 'Wi-Fi not connected - idle' }
+            if ($wifi.Connected -and $wifi.Ssid) { $W.JoinPending = $false; Set-WatchState 'Away' 'Away' "On '$($wifi.Ssid)' (not $($cfg.Ssid)) - idle"; return }
+            if ($wifi.Connected) { $W.JoinPending = $false; Set-WatchState 'Away' 'Away' 'Wi-Fi name unreadable (Location off?) - idle'; return }
+            if (-not $wifi.HasWifi -or $wifi.RadioOff) { $W.JoinPending = $false; Set-WatchState 'WifiOff' 'Away' 'Wi-Fi is turned off - idle'; return }
+            if ($W.JoinPending) {
+                # Asked Windows to join on the last check and it did not: RVCE is not in range.
+                $W.JoinPending = $false
+                Set-WatchState 'NotFound' 'Problem' "$($cfg.Ssid) Wi-Fi not found - trying again every minute" 'Warning'
+                $next = 60
+                return
+            }
+            if ((Request-RvceWifi) -eq 'NoProfile') {
+                Set-WatchState 'NoProfile' 'Problem' "No saved '$($cfg.Ssid)' Wi-Fi profile - connect once from the Wi-Fi menu" 'Warning'
+                $next = 300
+                return
+            }
+            $W.JoinPending = $true
+            if ($W.State -ne 'NotFound') { Set-TrayState 'Working' "Connecting to $($cfg.Ssid) Wi-Fi..." }
+            $next = 15
             return
         }
+        $W.JoinPending = $false
+        if ($justJoined) { Write-RvceLog "Joined the $($cfg.Ssid) Wi-Fi."; Start-Sleep -Seconds 3 }   # let DHCP settle
 
         # Internet
         $probe = Invoke-Probe

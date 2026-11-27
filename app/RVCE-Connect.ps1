@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     1. Checks that Windows is connected to the expected Wi-Fi network (config.json: Ssid)
-       and offers to reconnect using your saved Windows Wi-Fi profile.
+       and, if not, connects to it using your saved Windows Wi-Fi profile (no prompt).
     2. Makes sure the portal's certificate has been confirmed by you (pinned in config.json).
     3. Checks internet access with one request to the Windows connectivity-check URL.
     4. If offline, signs in ONCE, only to the allow-listed HTTPS portal (config.json: PortalHost/PortalPort),
@@ -15,7 +15,7 @@
 .PARAMETER BrowserOnly       Open the portal in your default browser instead of signing in here.
 .PARAMETER ForgetCredential  Remove the saved credential from Windows Credential Manager.
 .PARAMETER ResetCertificatePin  Forget the confirmed portal certificate fingerprint.
-.PARAMETER NoReconnect       Do not offer to reconnect the Wi-Fi.
+.PARAMETER NoReconnect       Do not connect to the Wi-Fi automatically.
 .PARAMETER NoWatch           Do not start the background watcher afterwards.
 .PARAMETER Gui               Use dialog boxes instead of the console (used when double-clicked).
 .PARAMETER InstallStartup    Start the background watcher automatically when you log in.
@@ -49,14 +49,11 @@ $EXIT_OK = 0; $EXIT_WIFI = 1; $EXIT_PORTAL = 2; $EXIT_AUTH = 3; $EXIT_VERIFY = 4
 
 function Connect-ExpectedWifi {
     $ssid = [string]$cfg.Ssid
-    & netsh.exe wlan show profiles "name=$ssid" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    Write-Step "Connecting to '$ssid'..."
+    if ((Request-RvceWifi) -eq 'NoProfile') {
         Write-Warn2 "No saved Windows Wi-Fi profile named '$ssid'. Connect once from the Wi-Fi menu, then run this again."
         return $false
     }
-    if (-not (Confirm-RvceChoice "You are not connected to the '$ssid' Wi-Fi. Connect now?" $true)) { return $false }
-    Write-Step "Connecting to '$ssid'..."
-    & netsh.exe wlan connect "name=$ssid" *> $null
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Seconds 1
         if (Test-ExpectedSsid (Get-WifiState)) { Start-Sleep -Seconds 2; return $true }  # let DHCP settle
